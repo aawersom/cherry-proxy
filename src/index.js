@@ -23,6 +23,7 @@ export default {
 
     const url = new URL(request.url);
     const targetUrl = url.searchParams.get('url');
+    const customReferer = url.searchParams.get('referer');
 
     if (!targetUrl) {
       return corsResponse('Missing ?url= parameter', 400);
@@ -60,8 +61,8 @@ export default {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8',
-          // Use target origin as Referer — required by VePorn, Spankbang, NoodleMagazine
-          'Referer': parsedTarget.origin + '/',
+          // customReferer overrides default — used for CDN requests needing a different origin (e.g. phncdn.com needs pornhub.com)
+          'Referer': customReferer || (parsedTarget.origin + '/'),
           ...(upstreamContentType ? { 'Content-Type': upstreamContentType } : {}),
           ...(isPost ? { 'X-Requested-With': 'XMLHttpRequest' } : {}),
         },
