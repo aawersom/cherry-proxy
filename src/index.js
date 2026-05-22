@@ -10,6 +10,41 @@
 
 const TIMEOUT_MS = 15000;
 
+// Constant-time string comparison via HMAC to prevent timing attacks on the proxy key.
+async function timingSafeEqual(a, b) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const [sigA, sigB] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(a)),
+    crypto.subtle.sign('HMAC', key, enc.encode(b)),
+  ]);
+  const da = new Uint8Array(sigA), db = new Uint8Array(sigB);
+  let diff = 0;
+  for (let i = 0; i < da.length; i++) diff |= da[i] ^ db[i];
+  return diff === 0;
+}
+
+// SSRF guard: block requests to private/loopback/link-local IP ranges.
+function isPrivateHostname(hostname) {
+  if (!hostname) return true;
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.localhost')) return true;
+  if (h === '::1' || h === '0:0:0:0:0:0:0:1') return true;
+  const parts = h.split('.');
+  if (parts.length === 4) {
+    const nums = parts.map(Number);
+    if (nums.some(isNaN)) return false;
+    const [a, b] = nums;
+    if (a === 0 || a === 127 || a === 240) return true;
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+  }
+  return false;
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -30,10 +65,11 @@ export default {
     }
 
     const secret = env.PROXY_KEY;
-    if (secret) {
-      if (url.searchParams.get('key') !== secret) {
-        return corsResponse('Forbidden', 403);
-      }
+    if (!secret) {
+      return corsResponse('Proxy not configured', 500);
+    }
+    if (!await timingSafeEqual(url.searchParams.get('key') || '', secret)) {
+      return corsResponse('Forbidden', 403);
     }
 
     let parsedTarget;
@@ -42,6 +78,10 @@ export default {
       if (!['http:', 'https:'].includes(parsedTarget.protocol)) throw new Error();
     } catch {
       return corsResponse('Invalid target URL', 400);
+    }
+
+    if (isPrivateHostname(parsedTarget.hostname)) {
+      return corsResponse('Target not allowed', 403);
     }
 
     const controller = new AbortController();
@@ -70,7 +110,7 @@ export default {
       });
     } catch (err) {
       if (err.name === 'AbortError') return corsResponse('Upstream timeout', 504);
-      return corsResponse('Upstream fetch failed: ' + err.message, 502);
+      return corsResponse('Upstream error', 502);
     } finally {
       clearTimeout(timer);
     }
@@ -78,7 +118,7 @@ export default {
     // Build response headers: pass through Content-Type + add CORS
     const responseHeaders = new Headers();
     responseHeaders.set('Access-Control-Allow-Origin', '*');
-    responseHeaders.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     responseHeaders.set('Access-Control-Expose-Headers', 'Content-Type, Content-Length');
 
     const contentType = upstream.headers.get('Content-Type');
@@ -99,8 +139,11 @@ function corsResponse(body, status) {
     status,
     headers: {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Content-Type': 'text/plain',
     },
   });
 }
+
+// Named exports for unit testing only — Cloudflare Workers ignores these.
+export { timingSafeEqual, isPrivateHostname };
