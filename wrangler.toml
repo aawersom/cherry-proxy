@@ -1,0 +1,11 @@
+name = "cherry-proxy"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Routes — uncomment and set your worker domain or custom domain
+# routes = [{ pattern = "proxy.yourdomain.com/*", custom_domain = true }]
+
+[vars]
+# Non-secret config vars go here.
+# Secret PROXY_KEY is set via: wrangler secret put PROXY_KEY
