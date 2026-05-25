@@ -105,6 +105,8 @@ export default {
           'Referer': customReferer || (parsedTarget.origin + '/'),
           ...(upstreamContentType ? { 'Content-Type': upstreamContentType } : {}),
           ...(isPost ? { 'X-Requested-With': 'XMLHttpRequest' } : {}),
+          // Forward Range header so upstream can return 206 Partial Content (required for video seeking)
+          ...(request.headers.get('Range') ? { 'Range': request.headers.get('Range') } : {}),
         },
         redirect: 'follow',
       });
@@ -115,17 +117,39 @@ export default {
       clearTimeout(timer);
     }
 
-    // Build response headers: pass through Content-Type + add CORS
+    // Build response headers: pass through Content-Type + range headers + add CORS
     const responseHeaders = new Headers();
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Type, Content-Length');
+    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Type, Content-Length, Content-Range, Accept-Ranges');
 
-    const contentType = upstream.headers.get('Content-Type');
+    const contentType = upstream.headers.get('Content-Type') || '';
     if (contentType) responseHeaders.set('Content-Type', contentType);
 
     const contentLength = upstream.headers.get('Content-Length');
     if (contentLength) responseHeaders.set('Content-Length', contentLength);
+
+    // Range support: pass through Accept-Ranges and Content-Range so video players can seek
+    const acceptRanges = upstream.headers.get('Accept-Ranges');
+    if (acceptRanges) responseHeaders.set('Accept-Ranges', acceptRanges);
+
+    const contentRange = upstream.headers.get('Content-Range');
+    if (contentRange) responseHeaders.set('Content-Range', contentRange);
+
+    // M3U8 rewriting: when the upstream returns an HLS playlist, relative segment/playlist
+    // URLs inside it must be rewritten to absolute proxied URLs. Without this, HLS players
+    // resolve relative URLs against the proxy origin and get 400/404.
+    const isM3u8 = contentType.includes('mpegurl') || contentType.includes('x-mpegurl') ||
+      parsedTarget.pathname.toLowerCase().endsWith('.m3u8');
+
+    if (isM3u8) {
+      const text = await upstream.text();
+      const proxyOrigin = new URL(request.url).origin;
+      const rewritten = rewriteM3u8(text, parsedTarget.toString(), proxyOrigin, env.PROXY_KEY);
+      responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
+      responseHeaders.delete('Content-Length'); // length changes after rewriting
+      return new Response(rewritten, { status: upstream.status, headers: responseHeaders });
+    }
 
     return new Response(upstream.body, {
       status: upstream.status,
@@ -133,6 +157,30 @@ export default {
     });
   },
 };
+
+// Rewrite an M3U8 playlist so that all segment/variant URLs go through the proxy.
+// Handles:
+//   - Non-comment lines (segment .ts / variant .m3u8 URLs, relative or absolute)
+//   - URI="..." attributes inside #EXT-X-MAP, #EXT-X-KEY, #EXT-X-MEDIA tags
+function rewriteM3u8(text, baseUrl, proxyOrigin, key) {
+  const base = new URL(baseUrl);
+  function proxify(rawUrl) {
+    let abs;
+    try { abs = new URL(rawUrl, base).toString(); } catch { return rawUrl; }
+    if (abs.startsWith(proxyOrigin)) return rawUrl; // already proxied
+    return proxyOrigin + '/proxy?url=' + encodeURIComponent(abs) + '&key=' + encodeURIComponent(key);
+  }
+  return text.split('\n').map(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+    // Rewrite URI="..." attributes in tag lines
+    if (trimmed.startsWith('#')) {
+      return line.replace(/URI="([^"]+)"/g, (_, u) => 'URI="' + proxify(u) + '"');
+    }
+    // Rewrite segment / variant playlist lines
+    return proxify(trimmed);
+  }).join('\n');
+}
 
 function corsResponse(body, status) {
   return new Response(body, {
