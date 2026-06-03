@@ -3,9 +3,9 @@
  *
  * GET /proxy?url=https://target-site.com/path&key=SECRET[&referer=...]
  *
- * For domains that block Cloudflare datacenter IPs (pornhub, eporner, spankbang),
+ * For domains that block Cloudflare datacenter IPs (pornhub, pornone),
  * outbound requests tunnel through a rotating pool of Dutch residential SOCKS5 proxies.
- * Pornhub/eporner see a Dutch residential IP, not Cloudflare's datacenter IP.
+ * Domain-hash affinity ensures page fetch and CDN stream use the same exit IP (KVS IP-bound tokens).
  *
  * All other domains: direct CF Worker fetch (unchanged behaviour).
  */
@@ -26,8 +26,9 @@ const PROXIES = [
 // Domains that need residential IP (blocked by CF datacenter IPs)
 const RESIDENTIAL = new Set([
   'www.pornhub.com', 'rt.pornhub.com',
-  'www.eporner.com',
-  'ru.spankbang.com', 'www.spankbang.com',
+  // pornone: Deno IP banned; SOCKS5 Dutch residential + domain-hash affinity for KVS IP-bound tokens
+  'pornone.com', 'www.pornone.com',
+  'gallery.vcmdiawe.com', 'galleryn2.vcmdiawe.com',
 ]);
 
 // ---- SOCKS5 helper: buffered byte reader from a ReadableStream -----------------
@@ -165,10 +166,26 @@ async function socks5Fetch(targetUrl, referer, proxy) {
   }
 }
 
-// ---- Rotation: try all proxies starting from time-based index -----------------
+// ---- DJB2 hash: deterministic proxy selection by domain (no shared state) ------
+// Guarantees that all requests for the same origin use the same SOCKS5 exit IP,
+// keeping KVS IP-bound tokens (pornone, phncdn ipa=1) valid across page+CDN fetches.
+// NOTE: segment URLs in rewriteM3u8 do not carry &referer= — safe for phncdn because
+// segment auth uses signed query params (validfrom/hash), not Referer header.
+// If future RESIDENTIAL CDNs validate Referer on segments, propagate referer in rewriteM3u8.
+function djb2Domain(referer, targetUrl) {
+  let domain;
+  try { domain = referer ? new URL(referer).hostname : new URL(targetUrl).hostname; }
+  catch (_) { try { domain = new URL(targetUrl).hostname; } catch (__) { domain = ''; } }
+  let h = 5381;
+  for (let i = 0; i < domain.length; i++) h = ((h << 5) + h) ^ domain.charCodeAt(i);
+  return Math.abs(h) % PROXIES.length;
+}
+
+// ---- Rotation: try all proxies starting from domain-hash index -----------------
 async function fetchViaResidential(targetUrl, referer) {
-  // Rotate every 30s so load spreads across proxies; no persistent state needed
-  const startIdx = Math.floor(Date.now() / 30000) % PROXIES.length;
+  // Domain-hash affinity: same origin → same starting proxy → same exit IP within a session.
+  // Fallback iteration on proxy failure may cause IP switch (accepted residual risk).
+  const startIdx = djb2Domain(referer, targetUrl);
   let lastError;
   for (let i = 0; i < PROXIES.length; i++) {
     const proxy = PROXIES[(startIdx + i) % PROXIES.length];
@@ -288,7 +305,9 @@ export default {
     if (isPrivateHostname(parsedTarget.hostname)) return corsResponse('Target not allowed', 403);
 
     // ---- Route residential-blocked domains via SOCKS5 -------------------------
-    if (!isPost && RESIDENTIAL.has(parsedTarget.hostname)) {
+    // pornone CDN subdomains (e.g. s1002.pornone.com) not enumerated in RESIDENTIAL — wildcard check
+    const needsResidential = RESIDENTIAL.has(parsedTarget.hostname) || /\.pornone\.com$/.test(parsedTarget.hostname);
+    if (!isPost && needsResidential) {
       try {
         return await fetchViaResidential(targetUrl, referer);
       } catch (e) {
