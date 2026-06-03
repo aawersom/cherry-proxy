@@ -257,13 +257,19 @@ function unchunk(buf) {
 }
 
 // ---- M3U8 rewriting -----------------------------------------------------------
-function rewriteM3u8(text, baseUrl, proxyOrigin, key) {
+// referer is propagated to segment proxy URLs so DJB2 domain-hash selects the SAME
+// SOCKS5 port (and thus same exit IP) for M3U8 and all segment fetches.
+// Without this, M3U8 uses port DJB2(www.pornhub.com) but segments use DJB2(ev-h.phncdn.com)
+// → different residential exit IPs → IP-bound token (ipa=1) fails → 404 on segments.
+function rewriteM3u8(text, baseUrl, proxyOrigin, key, referer) {
   const base = new URL(baseUrl);
   function proxify(rawUrl) {
     let abs;
     try { abs = new URL(rawUrl, base).toString(); } catch { return rawUrl; }
     if (abs.startsWith(proxyOrigin)) return rawUrl;
-    return proxyOrigin + '/proxy?url=' + encodeURIComponent(abs) + '&key=' + encodeURIComponent(key);
+    let p = proxyOrigin + '/proxy?url=' + encodeURIComponent(abs) + '&key=' + encodeURIComponent(key);
+    if (referer) p += '&referer=' + encodeURIComponent(referer);
+    return p;
   }
   return text.split('\n').map(line => {
     const trimmed = line.trim();
@@ -371,7 +377,7 @@ export default {
     if (isM3u8) {
       const text = await upstream.text();
       const proxyOrigin = new URL(request.url).origin;
-      const rewritten   = rewriteM3u8(text, parsedTarget.toString(), proxyOrigin, env.PROXY_KEY);
+      const rewritten   = rewriteM3u8(text, parsedTarget.toString(), proxyOrigin, env.PROXY_KEY, referer);
       responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
       responseHeaders.delete('Content-Length');
       return new Response(rewritten, { status: upstream.status, headers: responseHeaders });
