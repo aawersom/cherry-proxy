@@ -26,11 +26,8 @@ const PROXIES = [
 // Domains that need residential IP (blocked by CF datacenter IPs)
 const RESIDENTIAL = new Set([
   'www.pornhub.com', 'rt.pornhub.com',
-  // pornone: Deno IP banned; SOCKS5 Dutch residential + domain-hash affinity for KVS IP-bound tokens
-  'pornone.com', 'www.pornone.com',
-  'gallery.vcmdiawe.com', 'galleryn2.vcmdiawe.com',
-  // spankbang: Deno GCP IP blocked; Dutch residential bypasses this
-  'ru.spankbang.com',
+  // pornone: moved back to Deno (PROXY_URL_2) — Deno fixed IP for page+CDN token affinity
+  // spankbang: reverted to Deno — SOCKS5 Dutch residential also blocked; browse needs Deno
 ]);
 
 // ---- SOCKS5 helper: buffered byte reader from a ReadableStream -----------------
@@ -188,11 +185,21 @@ async function fetchViaResidential(targetUrl, referer) {
   // Domain-hash affinity: same origin → same starting proxy → same exit IP within a session.
   // Fallback iteration on proxy failure may cause IP switch (accepted residual risk).
   const startIdx = djb2Domain(referer, targetUrl);
+  // pornone CDN blocks specific residential IPs for video streaming — retry all proxies on 403.
+  // pornhub/phncdn: tokens are IP-bound so 403 = token mismatch, not IP ban — no retry there.
+  const h = new URL(targetUrl).hostname;
+  const retryOn403 = /\.pornone\.com$/.test(h) || h === 'pornone.com' || h === 'www.pornone.com';
   let lastError;
   for (let i = 0; i < PROXIES.length; i++) {
     const proxy = PROXIES[(startIdx + i) % PROXIES.length];
     try {
-      return await socks5Fetch(targetUrl, referer, proxy);
+      const resp = await socks5Fetch(targetUrl, referer, proxy);
+      if (retryOn403 && resp.status === 403) {
+        lastError = new Error('Upstream 403 on port ' + proxy.port + ' (CDN IP block)');
+        console.warn('cherry-proxy: pornone port ' + proxy.port + ' returned 403, trying next');
+        continue;
+      }
+      return resp;
     } catch (e) {
       lastError = e;
       console.warn('cherry-proxy: SOCKS5 port ' + proxy.port + ' failed:', e.message);
@@ -313,9 +320,8 @@ export default {
     if (isPrivateHostname(parsedTarget.hostname)) return corsResponse('Target not allowed', 403);
 
     // ---- Route residential-blocked domains via SOCKS5 -------------------------
-    // pornone CDN subdomains (e.g. s1002.pornone.com) and phncdn (all subdomains share same token IP)
+    // phncdn: all subdomains share same IP-bound token — must use SOCKS5 residential
     const needsResidential = RESIDENTIAL.has(parsedTarget.hostname)
-      || /\.pornone\.com$/.test(parsedTarget.hostname)
       || /\.phncdn\.com$/.test(parsedTarget.hostname);
     if (!isPost && needsResidential) {
       try {
