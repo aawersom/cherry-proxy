@@ -182,15 +182,17 @@ function djb2Domain(referer, targetUrl) {
 
 // ---- Rotation: try all proxies starting from domain-hash index -----------------
 async function fetchViaResidential(targetUrl, referer) {
-  // Domain-hash affinity: same origin → same starting proxy → same exit IP within a session.
-  // Fallback iteration on proxy failure may cause IP switch (accepted residual risk).
   const startIdx = djb2Domain(referer, targetUrl);
-  // pornone CDN blocks specific residential IPs for video streaming — retry all proxies on 403.
-  // pornhub/phncdn: tokens are IP-bound so 403 = token mismatch, not IP ban — no retry there.
   const h = new URL(targetUrl).hostname;
   const retryOn403 = /\.pornone\.com$/.test(h) || h === 'pornone.com' || h === 'www.pornone.com';
+  // phncdn + pornhub: tokens are IP-bound (HMAC of requester IP).
+  // Fallback to another proxy = different exit IP = token mismatch = 410.
+  // No fallback: clean failure is better than silent IP switch.
+  // pornone: fallback on 403 is intentional (CDN IP ban, not token mismatch).
+  const noFallback = /\.phncdn\.com$/.test(h) || RESIDENTIAL.has(h);
+  const maxTries = noFallback ? 1 : PROXIES.length;
   let lastError;
-  for (let i = 0; i < PROXIES.length; i++) {
+  for (let i = 0; i < maxTries; i++) {
     const proxy = PROXIES[(startIdx + i) % PROXIES.length];
     try {
       const resp = await socks5Fetch(targetUrl, referer, proxy);
