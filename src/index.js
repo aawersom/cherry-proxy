@@ -29,6 +29,8 @@ const RESIDENTIAL = new Set([
   // pornone: Deno IP banned; SOCKS5 Dutch residential + domain-hash affinity for KVS IP-bound tokens
   'pornone.com', 'www.pornone.com',
   'gallery.vcmdiawe.com', 'galleryn2.vcmdiawe.com',
+  // spankbang: Deno GCP IP blocked; Dutch residential bypasses this
+  'ru.spankbang.com',
 ]);
 
 // ---- SOCKS5 helper: buffered byte reader from a ReadableStream -----------------
@@ -305,8 +307,10 @@ export default {
     if (isPrivateHostname(parsedTarget.hostname)) return corsResponse('Target not allowed', 403);
 
     // ---- Route residential-blocked domains via SOCKS5 -------------------------
-    // pornone CDN subdomains (e.g. s1002.pornone.com) not enumerated in RESIDENTIAL — wildcard check
-    const needsResidential = RESIDENTIAL.has(parsedTarget.hostname) || /\.pornone\.com$/.test(parsedTarget.hostname);
+    // pornone CDN subdomains (e.g. s1002.pornone.com) and phncdn (all subdomains share same token IP)
+    const needsResidential = RESIDENTIAL.has(parsedTarget.hostname)
+      || /\.pornone\.com$/.test(parsedTarget.hostname)
+      || /\.phncdn\.com$/.test(parsedTarget.hostname);
     if (!isPost && needsResidential) {
       try {
         return await fetchViaResidential(targetUrl, referer);
