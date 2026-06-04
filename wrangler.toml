@@ -16,4 +16,4 @@ compatibility_flags = ["nodejs_compat"]
 # then paste the returned id below.
 [[kv_namespaces]]
 binding = "FAVS"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "f5fd540729014dcba1363a085a2c01f0"
