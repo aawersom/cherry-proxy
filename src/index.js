@@ -294,6 +294,71 @@ function corsResponse(body, status) {
   });
 }
 
+// ---- Favorites sync (PIN-keyed, KV-stored, server-side merge) -----------------
+function corsJson(obj, status) {
+  return new Response(JSON.stringify(obj), {
+    status: status || 200,
+    headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Content-Type': 'application/json' },
+  });
+}
+
+// Bucket key = HMAC-SHA256(SYNC_SECRET, pin) hex. The secret is a Cloudflare Secret
+// (never in the public repo), so the KV key can't be derived from the public code + pin.
+async function favBucket(secret, pin) {
+  const enc = new TextEncoder();
+  const k = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', k, enc.encode(String(pin)));
+  return Array.from(new Uint8Array(sig)).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+}
+
+// Merge two record sets by (id@source), last-write-wins on max(added, deleted).
+// A record is "active" when added > deleted; a deletion is a tombstone (deleted ts).
+function mergeFavs(a, b) {
+  const map = {};
+  function ts(r) { return Math.max(r.added || 0, r.deleted || 0); }
+  function take(r) {
+    if (!r || !r.id) return;
+    const key = r.id + '@' + (r.source || '');
+    if (!map[key] || ts(r) > ts(map[key])) map[key] = r;
+  }
+  (a || []).forEach(take);
+  (b || []).forEach(take);
+  return Object.keys(map).map(function (k) { return map[k]; });
+}
+
+async function handleFavs(request, env, url) {
+  // Gate behind the existing proxy key, AND the per-install SYNC_SECRET must exist.
+  if (!await timingSafeEqual(url.searchParams.get('key') || '', env.PROXY_KEY || '')) return corsJson({ error: 'forbidden' }, 403);
+  if (!env.SYNC_SECRET) return corsJson({ error: 'sync not configured' }, 500);
+  if (!env.FAVS)        return corsJson({ error: 'kv not bound' }, 500);
+
+  const pin = (url.searchParams.get('pin') || '').trim();
+  if (!/^[0-9]{4,12}$/.test(pin)) return corsJson({ error: 'bad pin' }, 400);
+
+  const bucket = await favBucket(env.SYNC_SECRET, pin);
+
+  // Best-effort rate limit: ~60 ops/min per bucket (slows pin enumeration).
+  const rlKey = 'rl:' + bucket + ':' + Math.floor(Date.now() / 60000);
+  const cnt = parseInt(await env.FAVS.get(rlKey) || '0', 10);
+  if (cnt > 60) return corsJson({ error: 'rate limited' }, 429);
+  await env.FAVS.put(rlKey, String(cnt + 1), { expirationTtl: 120 });
+
+  const kvKey = 'fav:' + bucket;
+
+  if (request.method === 'GET') {
+    const stored = await env.FAVS.get(kvKey);
+    return corsJson({ records: stored ? JSON.parse(stored) : [] });
+  }
+
+  // POST: merge client records with stored, persist, return the merged set.
+  let incoming = [];
+  try { incoming = (JSON.parse(await request.text()) || {}).records || []; } catch (e) {}
+  const storedRaw = await env.FAVS.get(kvKey);
+  const merged = mergeFavs(storedRaw ? JSON.parse(storedRaw) : [], incoming);
+  await env.FAVS.put(kvKey, JSON.stringify(merged));
+  return corsJson({ records: merged });
+}
+
 // ---- Main handler -------------------------------------------------------------
 export default {
   async fetch(request, env) {
@@ -301,6 +366,9 @@ export default {
 
     const isPost = request.method === 'POST';
     if (request.method !== 'GET' && !isPost) return corsResponse('Method not allowed', 405);
+
+    // Favorites sync endpoint (does not use ?url=).
+    if (new URL(request.url).pathname === '/favs') return handleFavs(request, env, new URL(request.url));
 
     const url       = new URL(request.url);
     const targetUrl = url.searchParams.get('url');
