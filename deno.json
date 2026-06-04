@@ -1,0 +1,5 @@
+{
+  "tasks": {
+    "start": "deno serve --allow-net --allow-env deno.js"
+  }
+}
