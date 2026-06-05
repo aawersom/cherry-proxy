@@ -290,7 +290,15 @@ function rewriteM3u8(text, baseUrl, proxyOrigin, key, referer) {
 function corsResponse(body, status) {
   return new Response(body, {
     status,
-    headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Content-Type': 'text/plain' },
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      // Required so the browser's preflight allows a JSON POST (favorites sync).
+      // Without this, application/json POSTs from lampa.mx are blocked by CORS.
+      'Access-Control-Allow-Headers': 'Content-Type, X-Body-Content-Type, Range',
+      'Access-Control-Max-Age': '86400',
+      'Content-Type': 'text/plain',
+    },
   });
 }
 
@@ -298,7 +306,12 @@ function corsResponse(body, status) {
 function corsJson(obj, status) {
   return new Response(JSON.stringify(obj), {
     status: status || 200,
-    headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Content-Type': 'application/json' },
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Body-Content-Type, Range',
+      'Content-Type': 'application/json',
+    },
   });
 }
 
